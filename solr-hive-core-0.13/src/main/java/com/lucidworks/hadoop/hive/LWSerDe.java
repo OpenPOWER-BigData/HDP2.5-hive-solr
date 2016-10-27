@@ -12,6 +12,7 @@ import org.apache.hadoop.hive.serde.Constants;
 import org.apache.hadoop.hive.serde2.SerDe;
 import org.apache.hadoop.hive.serde2.SerDeException;
 import org.apache.hadoop.hive.serde2.SerDeStats;
+import org.apache.hadoop.hive.serde2.objectinspector.ListObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspector.Category;
 import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspectorUtils;
@@ -35,7 +36,6 @@ public class LWSerDe implements SerDe {
   protected List<String> colNames;
   protected List<TypeInfo> colTypes;
   protected List<Object> row;
-  private JobConf conf;
 
   @Override
   public void initialize(Configuration conf, Properties tblProperties) throws SerDeException {
@@ -45,14 +45,7 @@ public class LWSerDe implements SerDe {
         .getTypeInfosFromTypeString(tblProperties.getProperty(Constants.LIST_COLUMN_TYPES));
     typeInfo = (StructTypeInfo) TypeInfoFactory.getStructTypeInfo(colNames, colTypes);
     inspector = TypeInfoUtils.getStandardJavaObjectInspectorFromTypeInfo(typeInfo);
-    row = new ArrayList<Object>();
-
-    try {
-      LWDocumentProvider.init((JobConf) conf);
-      this.conf = (JobConf) conf;
-    } catch (Exception e) {
-      LOG.warn("LWDocumentFactoryHandler not initialize");
-    }
+    row = new ArrayList<>();
   }
 
   @Override
@@ -128,21 +121,27 @@ public class LWSerDe implements SerDe {
         }
 
       } else {
-        switch (f.getFieldObjectInspector().getCategory()) {
-          case PRIMITIVE:
-            Object value = ObjectInspectorUtils
-                .copyToStandardJavaObject(inspector.getStructFieldData(data, f),
-                    f.getFieldObjectInspector());
-            doc.addField(docFieldName, value);
-            break;
-
-          case STRUCT:
-          case MAP:
-          case LIST:
-          case UNION:
-            throw new SerDeException(
-                "We don't yet support nested types (found " + f.getFieldObjectInspector()
-                    .getTypeName() + ")");
+	    ObjectInspector foi = f.getFieldObjectInspector();
+        Category foiCategory = foi.getCategory();
+        if (!foiCategory.equals(Category.PRIMITIVE) && !foiCategory.equals(Category.LIST)) {
+		  throw new SerDeException("We don't yet support nested types (found "
+            + f.getFieldObjectInspector().getTypeName() + ")");
+        }
+        Object value = ObjectInspectorUtils.copyToStandardJavaObject(inspector.getStructFieldData(data, f),
+        f.getFieldObjectInspector());
+        if (foiCategory.equals(Category.PRIMITIVE)) {
+          doc.addField(docFieldName, value);
+        } else {
+          ListObjectInspector loi = (ListObjectInspector) f.getFieldObjectInspector();
+          if (loi.getListElementObjectInspector().getCategory() != Category.PRIMITIVE) {
+            throw new SerDeException("We don't support arrays of non-primitive types (found "
+              + f.getFieldObjectInspector().getTypeName() + ")");
+          }
+          for (int j = 0; j < loi.getListLength(value); j++) {
+            Object itemValue = ObjectInspectorUtils.copyToStandardJavaObject(loi.getListElement(value, j),
+              loi.getListElementObjectInspector());
+            doc.addField(docFieldName, itemValue);
+          }
         }
       }
     }
